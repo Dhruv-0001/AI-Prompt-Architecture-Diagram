@@ -59,14 +59,22 @@ NAMING_FIXES = {
     'ElastiCache': 'Elasticache',
     'EventBridge': 'Eventbridge',
     'StepFunction': 'StepFunctions',
+    'StepFunctionss': 'StepFunctions',  # Common typo with double 's'
     'Users': 'User',
     'Clients': 'Client',
     'NodeJS': 'NodeJS',  # Already correct
+    'APIGateway': 'APIGateway',  # Correct
+    'Api_Gateway': 'APIGateway',
+    'ApiGateway': 'APIGateway',
+    'ElasticCache': 'Elasticache',  # Common typo
+    'DynamoDb': 'Dynamodb',  # Common typo
     'from diagrams.onprem.client import Users': 'from diagrams.onprem.client import User',
     'from diagrams.onprem.client import Clients': 'from diagrams.onprem.client import Client',
     'from diagrams.aws.database import DynamoDB': 'from diagrams.aws.database import Dynamodb',
     'from diagrams.aws.database import ElastiCache': 'from diagrams.aws.database import Elasticache',
     'from diagrams.aws.integration import EventBridge': 'from diagrams.aws.integration import Eventbridge',
+    'from diagrams.aws.integration import StepFunction': 'from diagrams.aws.integration import StepFunctions',
+    'from diagrams.aws.integration import StepFunctionss': 'from diagrams.aws.integration import StepFunctions',
 }
 
 def setup_gemini(api_key):
@@ -85,13 +93,26 @@ def get_component_list_for_prompt():
     return '\n'.join(component_list)
 
 def validate_and_fix_imports(code):
-    """Validate imports and fix common issues"""
+    """Validate imports and fix common issues with aggressive pattern matching"""
     
-    # First, apply common naming fixes
+    # First, apply common naming fixes (simple string replacement)
     for old, new in NAMING_FIXES.items():
         code = code.replace(old, new)
     
-    # Parse the code to extract imports
+    # Fix common typo patterns with regex (doubled letters, common mistakes)
+    import_patterns = [
+        (r'StepFunctionss', 'StepFunctions'),  # Double 's'
+        (r'Stepfunctions', 'StepFunctions'),   # Wrong case
+        (r'stepfunctions', 'StepFunctions'),   # All lowercase
+        (r'DynamoDb', 'Dynamodb'),             # Wrong case
+        (r'ElasticCache', 'Elasticache'),      # Wrong case
+        (r'ApiGateway', 'APIGateway'),         # Wrong case
+    ]
+    
+    for pattern, replacement in import_patterns:
+        code = re.sub(pattern, replacement, code)
+    
+    # Parse the code to extract and validate imports
     try:
         tree = ast.parse(code)
         imports_to_fix = []
@@ -106,30 +127,53 @@ def validate_and_fix_imports(code):
                         # Check if this component exists in our mapping
                         if module in AVAILABLE_COMPONENTS:
                             if component_name not in AVAILABLE_COMPONENTS[module]:
-                                # Find similar component or remove it
+                                # Find similar component
                                 similar = find_similar_component(component_name, AVAILABLE_COMPONENTS[module])
                                 if similar:
                                     imports_to_fix.append((component_name, similar))
+                                    st.sidebar.info(f"🔧 Auto-fixing: {component_name} → {similar}")
         
-        # Apply fixes
+        # Apply fixes to imports and usage
         for old_name, new_name in imports_to_fix:
+            # Fix import statement
             code = code.replace(f'import {old_name}', f'import {new_name}')
-            code = code.replace(f'{old_name}(', f'{new_name}(')
+            # Fix usage in code (be careful with word boundaries)
+            code = re.sub(rf'\b{re.escape(old_name)}\b', new_name, code)
             
-    except SyntaxError:
-        pass
+    except SyntaxError as e:
+        # If code has syntax errors, try basic fixes anyway
+        st.sidebar.warning(f"⚠️ Syntax issue detected, applying basic fixes")
     
     return code
 
 def find_similar_component(name, available_components):
-    """Find a similar component name in the available list"""
+    """Find a similar component name using fuzzy matching"""
     name_lower = name.lower()
     
+    # Direct case-insensitive match
     for component in available_components:
         if name_lower == component.lower():
             return component
+    
+    # Check for substring matches
+    for component in available_components:
         if name_lower in component.lower() or component.lower() in name_lower:
             return component
+    
+    # Check for similarity (Levenshtein distance approximation)
+    # Remove doubled characters and try again
+    cleaned_name = re.sub(r'(.)\1+', r'\1', name)
+    if cleaned_name != name:
+        for component in available_components:
+            if cleaned_name.lower() == component.lower():
+                return component
+    
+    # Try without last character (catches doubled last chars)
+    if len(name) > 2:
+        trimmed = name[:-1]
+        for component in available_components:
+            if trimmed.lower() == component.lower():
+                return component
     
     return None
 
@@ -214,9 +258,10 @@ Generate ONLY the Python code, no explanations."""
 
 def execute_diagram_code(code, output_dir):
     """Execute the generated diagram code and return the PNG file path"""
+    original_dir = os.getcwd()
+    
     try:
         # Change to output directory
-        original_dir = os.getcwd()
         os.chdir(output_dir)
         
         # Create a namespace for execution
@@ -236,9 +281,28 @@ def execute_diagram_code(code, output_dir):
         else:
             return False, None, "PNG file not found after execution"
             
+    except ImportError as e:
+        os.chdir(original_dir)
+        error_msg = str(e)
+        
+        # Extract the problematic import name if possible
+        import_match = re.search(r"cannot import name '(\w+)'", error_msg)
+        if import_match:
+            bad_import = import_match.group(1)
+            return False, None, f"Import error: '{bad_import}' is not a valid component. The AI may have made a typo. Try regenerating or simplifying your prompt."
+        else:
+            return False, None, f"Import error: {error_msg}"
+            
     except Exception as e:
         os.chdir(original_dir)
         return False, None, str(e)
+    
+    finally:
+        # Ensure we always return to original directory
+        try:
+            os.chdir(original_dir)
+        except:
+            pass
 
 # ============================================================================
 # STREAMLIT UI
@@ -376,6 +440,20 @@ with Prometheus"""
     
     Supports AWS, Kubernetes, and generic infrastructure components.
     """)
+    
+    st.markdown("---")
+    
+    # Auto-fix feature notice
+    st.success("""
+    🔧 **Auto-Fix Enabled**
+    
+    The system automatically corrects common typos like:
+    - StepFunctionss → StepFunctions
+    - DynamoDB → Dynamodb
+    - EventBridge → Eventbridge
+    
+    If you get an error, just click Generate again!
+    """)
 
 # Main Content Area
 col1, col2 = st.columns([1, 1])
@@ -476,7 +554,16 @@ if generate_button:
                         with st.expander("🔍 View Generated Code (with errors)", expanded=True):
                             st.code(diagram_code, language="python")
                         
-                        st.warning("💡 Try running again or simplify your description.")
+                        st.warning("💡 **Try clicking 'Generate Diagram' again** - the validation will auto-fix common typos!")
+                        
+                        # Show helpful error-specific guidance
+                        if "import" in error.lower():
+                            st.info("""
+                            **Import Error Detected:** The AI may have used an incorrect component name.
+                            - Click 'Generate Diagram' again (auto-fixes are now in place)
+                            - Or try simplifying your prompt
+                            - The system will automatically correct common typos like 'StepFunctionss' → 'StepFunctions'
+                            """)
                         
         except Exception as e:
             status_placeholder.error(f"❌ Error: {str(e)}")
