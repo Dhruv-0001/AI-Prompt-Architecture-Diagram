@@ -1,0 +1,6 @@
+streamlit
+diagrams>=0.24.0
+google-generativeai
+pillow>=10.3.0
+python-dotenv
+
